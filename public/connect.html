@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <body style="font-family:sans-serif;padding:2rem">
+    <h2>Connect a Bank</h2>
+    <label>Label (capital-one/chase/us-bank): <input id="label" value="capital-one"></label>
+    <p><button id="connect">Connect</button></p>
+    <script src="https://cdn.teller.io/connect/connect.js"></script>
+    <script>
+      const connect = TellerConnect.setup({
+        applicationId: "app_ph832a01sgi892se18000",
+        onSuccess: async (auth) => {
+          await fetch("/save-token", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ access_token: auth.accessToken, label: document.getElementById('label').value })
+          });
+          alert("Linked!");
+        },
+        onExit: () => {}
+      });
+      document.getElementById("connect").onclick = () => connect.open();
+    </script>
+  </body>
+</html>
