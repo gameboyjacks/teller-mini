@@ -243,7 +243,25 @@ app.post("/sync-delta", async (req, res) => {
           );
       }
     }
+app.post('/webhook', express.json(), async (req, res) => {
+  const event = req.body;
 
+  if (event.type === 'transactions.processed') {
+    const transactions = event.data.transactions;
+
+    for (const txn of transactions) {
+      await supabase
+        .from('transactions')
+        .upsert({
+          id: txn.id,
+          description: txn.description,
+          amount: txn.amount,
+          date: txn.date
+        });
+    }
+  }
+  res.sendStatus(200);
+});
     res.json({ ok: true, new_transactions: inserted });
   } catch (e) {
     console.error(e);
