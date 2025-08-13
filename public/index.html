@@ -59,25 +59,27 @@
         applicationId,
         environment,            // 'development' or 'production'
         selectAccount: "multiple",
-        onSuccess: async ({ accessToken, user }) => {
+        onSuccess: async ({ accessToken }) => {
           try {
             log("Got access token. Saving + syncing…");
+
+            // save once so future /sync-delta runs don't need the token
             await fetch("/save-token", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ accessToken }),
             });
 
+            // include token here to satisfy /sync
+            const count = Math.min(Number(document.getElementById("count").value) || 500, 500); // cap 500
             const resp = await fetch("/sync", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ count }),
+              body: JSON.stringify({ accessToken, count }),
             });
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.error || JSON.stringify(data));
             log(`Sync complete → accounts: ${data.accounts}, transactions: ${data.transactions}`, "ok");
-          } catch (e) {
-            log(`Sync error: ${e.message || e}`, "err");
           }
         },
         onFailure: (e) => {
