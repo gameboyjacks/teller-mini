@@ -5,40 +5,40 @@
   <title>Teller → Supabase Sync</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cdn.teller.io/connect/connect.js"></script>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
-      button { padding: 0.75rem 1rem; font-size: 1rem; border-radius: 10px; border: 1px solid #ddd; cursor: pointer; }
-      .log { margin-top: 1rem; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      .ok { color: #0a0; }
-      .err { color: #a00; }
-      .row { margin: 0.5rem 0; }
-      label { display: inline-block; width: 10rem; }
-      input { width: 22rem; padding: 0.4rem 0.6rem; }
-    </style>
-  </head>
-  <body>
-    <h1>Teller → Supabase Sync</h1>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    button { padding: 0.75rem 1rem; font-size: 1rem; border-radius: 10px; border: 1px solid #ddd; cursor: pointer; }
+    .log { margin-top: 1rem; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ok { color: #0a0; }
+    .err { color: #a00; }
+    .row { margin: 0.5rem 0; }
+    label { display: inline-block; width: 10rem; }
+    input { width: 22rem; padding: 0.4rem 0.6rem; }
+  </style>
+</head>
+<body>
+  <h1>Teller → Supabase Sync</h1>
 
-    <div class="row">
-      <label>Application ID</label>
-      <input id="appId" placeholder="app_xxxxx" value="app_XXXX_REPLACE_ME" />
-    </div>
-    <div class="row">
-      <label>Environment</label>
-      <input id="env" placeholder="development or production" value="development" />
-    </div>
-    <div class="row">
-      <label>Txn Count</label>
-      <input id="count" type="number" min="1" max="500" value="500" />
-    </div>
+  <div class="row">
+    <label>Application ID</label>
+    <input id="appId" placeholder="app_xxxxx" value="app_XXXX_REPLACE_ME" />
+  </div>
+  <div class="row">
+    <label>Environment</label>
+    <input id="env" placeholder="development or production" value="development" />
+  </div>
+  <div class="row">
+    <label>Txn Count</label>
+    <input id="count" type="number" min="1" max="500" value="500" />
+  </div>
 
-    <p>
-      <button id="connectBtn">Connect bank & sync</button>
-    </p>
+  <p>
+    <button id="connectBtn">Connect bank & sync</button>
+  </p>
 
-    <div id="log" class="log"></div>
+  <div id="log" class="log"></div>
 
-    <script>
+  <script>
     const log = (msg, cls = "") => {
       const el = document.getElementById("log");
       const p = document.createElement("div");
@@ -50,28 +50,25 @@
     document.getElementById("connectBtn").addEventListener("click", () => {
       const applicationId = document.getElementById("appId").value.trim();
       const environment   = document.getElementById("env").value.trim();
-      const count         = Math.min(Number(document.getElementById("count").value) || 500, 500); // Teller cap ~500
+      const count         = Math.min(Number(document.getElementById("count").value) || 500, 500);
 
       if (!applicationId || applicationId.includes("REPLACE_ME")) return log("Missing/placeholder Application ID", "err");
       if (!environment) return log("Missing environment", "err");
 
       const connect = TellerConnect.setup({
         applicationId,
-        environment,            // 'development' or 'production'
+        environment,           // 'development' or 'production'
         selectAccount: "multiple",
         onSuccess: async ({ accessToken }) => {
           try {
             log("Got access token. Saving + syncing…");
 
-            // save once so future /sync-delta runs don't need the token
             await fetch("/save-token", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ accessToken }),
             });
 
-            // include token here to satisfy /sync
-            const count = Math.min(Number(document.getElementById("count").value) || 500, 500); // cap 500
             const resp = await fetch("/sync", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -80,6 +77,8 @@
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.error || JSON.stringify(data));
             log(`Sync complete → accounts: ${data.accounts}, transactions: ${data.transactions}`, "ok");
+          } catch (e) {
+            log(`Sync error: ${e.message || e}`, "err");
           }
         },
         onFailure: (e) => {
