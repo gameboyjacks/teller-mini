@@ -101,7 +101,7 @@ app.use(express.json());
 // Optional: redirect root to connect page
 app.get("/", (_req, res) => res.redirect("/connect.html"));
 
-// Serve static only when you want to add banks (toggle with ENABLE_CONNECT=true)
+// Serve static only when you want to add banks (toggle with ENABLE_CONNECT=true) ??
 if (process.env.ENABLE_CONNECT === "true") {
   app.use(express.static(path.join(__dirname, "public")));
 }
