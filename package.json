@@ -1,12 +1,14 @@
 {
-  "name": "teller-mini",
-  "private": true,
-  "type": "module",
-  "engines": { "node": ">=18 <=20" },
-  "scripts": { "start": "node server.js" },
+  "name": "teller-supabase-sync",
+  "version": "1.0.0",
+  "description": "Minimal backend to connect Teller to Supabase and sync bank data",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
-    "pg": "^8.11.3"
+    "@supabase/supabase-js": "^2.44.4",
+    "axios": "^1.7.4",
+    "express": "^4.18.2"
   }
 }

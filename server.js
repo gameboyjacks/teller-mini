@@ -1,201 +1,158 @@
-// server.js (Node 18–20, ESM)
+// server.js
+// Minimal backend that:
+// 1) Serves a tiny Connect page from /public
+// 2) Accepts POST /sync { accessToken } from the page
+// 3) Calls Teller (mTLS in dev/prod) and writes to Supabase via RPC upserts
 
-import fs from "fs";
-import path from "path";
-import https from "https";
 import express from "express";
-import fetch from "node-fetch";
+import path from "path";
+import fs from "fs";
+import https from "https";
+import axios from "axios";
 import { fileURLToPath } from "url";
-import { Pool } from "pg";
+import { createClient } from "@supabase/supabase-js";
 
-// ----- paths / env -----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = process.env.PORT || 3000;
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || "";
+// ---------- ENV ----------
+const {
+  PORT,
+  TELLER_ENV = "development", // development | production (no sandbox here)
+  TELLER_CERT_PEM_B64,        // base64 of your client cert PEM
+  TELLER_KEY_PEM_B64,         // base64 of your client key PEM
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+} = process.env;
 
-// mTLS certs from env (Render) or local fallback for dev
-function tryRead(p) { try { return fs.readFileSync(path.join(__dirname, p), "utf8"); } catch { return undefined; } }
-const cert = process.env.TELLER_CLIENT_CERT || tryRead("./public/dev-certs/client.pem");
-const key  = process.env.TELLER_CLIENT_KEY  || tryRead("./public/dev-certs/client.key");
-const ca   = process.env.TELLER_CA_CERT     || tryRead("./public/dev-certs/ca.pem");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.");
+}
+if (TELLER_ENV !== "sandbox" && (!TELLER_CERT_PEM_B64 || !TELLER_KEY_PEM_B64)) {
+  throw new Error("Missing Teller mTLS env vars (CERT/KEY) for development/production.");
+}
 
-const tellerAgent = new https.Agent({ cert, key, ca });
-const TELLER_API = "https://api.teller.io";
-
-// ----- Postgres (Supabase) -----
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+// ---------- Supabase (server-side only) ----------
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
 });
 
-// Ensure minimal schema (safe if already created)
-async function ensureSchema() {
-  await pool.query(`
-    create table if not exists tokens (
-      label text primary key,
-      access_token text not null,
-      updated_at timestamptz default now()
-    );
-    create table if not exists accounts (
-      account_id text primary key,
-      bank_label text not null references tokens(label),
-      name text,
-      type text,
-      created_at timestamptz default now()
-    );
-    create table if not exists account_sync_state (
-      account_id text primary key references accounts(account_id) on delete cascade,
-      last_seen date not null
-    );
-  `);
-}
-ensureSchema().catch(e => console.error("ensureSchema error:", e));
-
-// token helpers
-async function setToken(label, token) {
-  await pool.query(
-    `insert into tokens(label, access_token)
-     values ($1,$2)
-     on conflict (label) do update set access_token=excluded.access_token, updated_at=now()`,
-    [label, token]
-  );
-}
-async function getToken(label) {
-  const r = await pool.query(`select access_token from tokens where label=$1`, [label]);
-  return r.rows[0]?.access_token;
-}
-async function listLabels() {
-  const r = await pool.query(`select label from tokens order by label`);
-  return r.rows.map(x => x.label);
-}
-async function getTokenForAccount(accountId) {
-  const r = await pool.query(
-    `select t.access_token
-     from accounts a join tokens t on a.bank_label = t.label
-     where a.account_id = $1`,
-    [accountId]
-  );
-  return r.rows[0]?.access_token;
+// ---------- Decode certs for mTLS ----------
+let httpsAgent = undefined;
+if (TELLER_ENV !== "sandbox") {
+  const CERT_PATH = "/tmp/teller_client.pem";
+  const KEY_PATH  = "/tmp/teller_client.key";
+  fs.writeFileSync(CERT_PATH, Buffer.from(TELLER_CERT_PEM_B64, "base64"));
+  fs.writeFileSync(KEY_PATH,  Buffer.from(TELLER_KEY_PEM_B64, "base64"));
+  httpsAgent = new https.Agent({
+    cert: fs.readFileSync(CERT_PATH),
+    key:  fs.readFileSync(KEY_PATH),
+  });
 }
 
-// upsert accounts by label
-async function upsertAccounts(label, accounts) {
-  if (!Array.isArray(accounts)) return;
-  const text = `
-    insert into accounts(account_id, bank_label, name, type)
-    values ($1,$2,$3,$4)
-    on conflict (account_id) do update
-      set bank_label=excluded.bank_label, name=excluded.name, type=excluded.type
-  `;
-  for (const a of accounts) {
-    await pool.query(text, [a.id, label, a.name || null, a.type || null]);
+// ---------- Helpers ----------
+const TELLER_BASE = "https://api.teller.io";
+
+const authHeader = (accessToken) =>
+  `Basic ${Buffer.from(`${accessToken}:`).toString("base64")}`;
+
+async function tellerGET(pathname, accessToken) {
+  const url = `${TELLER_BASE}${pathname}`;
+  const res = await axios.get(url, {
+    httpsAgent,
+    headers: { Authorization: authHeader(accessToken) },
+    validateStatus: () => true,
+  });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Teller ${res.status}: ${typeof res.data === "string" ? res.data : JSON.stringify(res.data)}`);
   }
+  return res.data;
 }
 
-// ----- App -----
+// ---------- Express ----------
 const app = express();
 app.use(express.json());
 
-// Optional: redirect root to connect page
-app.get("/", (_req, res) => res.redirect("/connect.html"));
+// (Optional) CORS if you later host the HTML elsewhere
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
-// Serve static only when you want to add banks (toggle with ENABLE_CONNECT=true) ??
-if (process.env.ENABLE_CONNECT === "true") {
-  app.use(express.static(path.join(__dirname, "public")));
-}
+// Serve the Connect page
+app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 // Health
-app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => res.json({ ok: true, env: TELLER_ENV }));
 
-// Save access token from Teller Connect
-app.post("/save-token", async (req, res) => {
-  const { access_token, label } = req.body || {};
-  if (!access_token) return res.status(400).json({ error: "missing access_token" });
-  const k = (label || "default").toLowerCase();
-  await setToken(k, access_token);
-  console.log("Saved token for label:", k);
-  res.json({ ok: true, label: k });
-});
-
-// List accounts (also upserts them into DB with bank_label)
-app.get("/accounts", async (req, res) => {
+// Main sync endpoint
+app.post("/sync", async (req, res) => {
   try {
-    const label = (req.query.label || "default").toLowerCase();
-    const token = await getToken(label);
-    if (!token) return res.status(404).json({ error: `no token for label "${label}"` });
+    const { accessToken, count = 500 } = req.body || {};
+    if (!accessToken) return res.status(400).json({ error: "Missing accessToken" });
 
-    const r = await fetch(`${TELLER_API}/accounts`, {
-      agent: tellerAgent,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await r.json();
+    // 1) List accounts
+    const accounts = await tellerGET("/accounts", accessToken);
 
-    if (Array.isArray(data)) {
-      await upsertAccounts(label, data);
-    }
-    res.status(r.status).json(data);
-  } catch (e) {
-    console.error("GET /accounts error:", e);
-    res.status(500).json({ error: "accounts_failed" });
-  }
-});
+    let txnTotal = 0;
 
-// Transactions: you can pass ?label=... OR omit it and we'll look up by account_id
-app.get("/accounts/:id/transactions", async (req, res) => {
-  try {
-    const { id } = req.params;
-    let token;
-    if (req.query.label) token = await getToken(String(req.query.label).toLowerCase());
-    else token = await getTokenForAccount(id);
+    for (const a of accounts) {
+      const instId = a?.institution?.id ?? null;
+      const instName = a?.institution?.name ?? null;
 
-    if (!token) return res.status(404).json({ error: "no token for this account/label" });
+      // Upsert institution
+      if (instId && instName) {
+        await supabase.rpc("upsert_institution", { p_id: instId, p_name: instName });
+      }
 
-    const params = new URLSearchParams();
-    if (req.query.from) params.set("from", req.query.from);
-    if (req.query.to)   params.set("to", req.query.to);
-
-    const url = `${TELLER_API}/accounts/${encodeURIComponent(id)}/transactions` +
-                (params.toString() ? `?${params.toString()}` : "");
-
-    const r = await fetch(url, {
-      agent: tellerAgent,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await r.json();
-    res.status(r.status).json(data);
-  } catch (e) {
-    console.error("GET /accounts/:id/transactions error:", e);
-    res.status(500).json({ error: "transactions_failed" });
-  }
-});
-
-// Optional: forward Teller webhooks to n8n
-app.post("/teller-webhook", async (req, res) => {
-  try {
-    if (N8N_WEBHOOK_URL) {
-      await fetch(N8N_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body),
+      // Upsert account
+      await supabase.rpc("upsert_account", {
+        p_id: a.id,
+        p_institution_id: instId,
+        p_name: a.name,
+        p_type: a.type,
+        p_subtype: a.subtype,
+        p_last_four: a.last_four,
+        p_currency: a.currency,
+        p_status: a.status,
+        p_raw: a,
       });
+
+      // 2) Transactions (grab latest 'count')
+      const txns = await tellerGET(`/accounts/${a.id}/transactions?count=${count}`, accessToken);
+      txnTotal += Array.isArray(txns) ? txns.length : 0;
+
+      // Upsert transactions
+      for (const t of txns) {
+        await supabase.rpc("upsert_transaction", {
+          p_id: t.id,
+          p_account_id: t.account_id,
+          p_posted_date: t.date,
+          p_description: t.description,
+          p_amount: Number(t.amount),
+          p_type: t.type,
+          p_status: t.status,
+          p_running_balance: t.running_balance != null ? Number(t.running_balance) : null,
+          p_details: t.details ?? null,
+          p_raw: t,
+        });
+      }
     }
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("forward to n8n failed:", e);
-    res.json({ ok: true, forwarded: false });
+
+    res.json({ ok: true, accounts: accounts.length, transactions: txnTotal });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-// Debug: see which labels we have tokens for
-app.get("/debug/labels", async (_req, res) => {
-  res.json({ labels: await listLabels() });
-});
-
-app.listen(PORT, () => {
-  console.log(`teller-mini listening on :${PORT}`);
-  if (!cert || !key) console.warn("⚠️ set TELLER_CLIENT_CERT / TELLER_CLIENT_KEY in Render.");
-  if (!process.env.DATABASE_URL) console.warn("⚠️ DATABASE_URL not set.");
-  if (!process.env.ENABLE_CONNECT) console.log("ℹ️ connect.html disabled unless ENABLE_CONNECT=true");
+// Start
+const listenPort = Number(PORT) || 8001;
+app.listen(listenPort, () => {
+  console.log(`teller-supabase-sync listening on :${listenPort} (env=${TELLER_ENV})`);
 });
