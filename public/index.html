@@ -60,19 +60,22 @@
         environment,            // 'development' or 'production'
         selectAccount: "multiple",
         onSuccess: async ({ accessToken, user }) => {
-          try {
-            log("Got access token. Syncing to Supabase…");
-            const resp = await fetch("/sync", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ accessToken, count }),
-            });
-            const data = await resp.json();
-            if (!resp.ok) throw new Error(data.error || JSON.stringify(data));
-            log(`Sync complete → accounts: ${data.accounts}, transactions: ${data.transactions}`, "ok");
-          } catch (e) {
-            log(`Sync error: ${e.message || e}`, "err");
-          }
+          log("Got access token. Syncing to Supabase…");
+          await fetch("/save-token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ accessToken }),
+          });
+          const resp = await fetch("/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ count: Number(document.getElementById("count").value) || 500 }),
+          });
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || JSON.stringify(data));
+          log(`Sync complete → accounts: ${data.accounts}, transactions: ${data.transactions}`, "ok");
+        }
+
         },
         onFailure: (e) => {
           log(`Connect failed: ${JSON.stringify(e)}`, "err");
